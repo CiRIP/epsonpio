@@ -1,0 +1,86 @@
+;
+; Half-duplex DSIO TX.
+; Designed to run on PIO0 SM0. No clock divider, it runs at sysclk.
+;
+; Pin mapping:
+;   out/set/sideset : DSIO  (GPIO direction controlled by set pindirs)
+;   jmp_pin         : DST2
+;   hardcoded gpios : DST2 (GPIO 12), CLKDIV (GPIO 13)
+;
+; Handles the activation handshake that brings up the debug port:
+; On first entry, if DST2 is already high the activation handshake is skipped.
+; Otherwise DSIO is pulled low (pindirs=1, pins=0) until DST2 asserts,
+; then DSIO is released (pindirs=0) and normal operation begins.
+;
+; Between bytes DSIO is tri-stated (pindirs=0) so the remote device
+; can drive the bus for its reply (half-duplex).
+; The RX SM on PIO1 observes DSIO throughout, capturing the echo.
+;
+; Autopull: disabled. Explicit pull per byte.
+; Out shift: right, 8 bits.
+;
+
+.program dsio_tx
+.side_set 1 opt
+
+    ; activation handshake (runs once on startup)
+    jmp pin start           ; DST2 already high? skip handshake
+
+    set pindirs, 1  side 0  ; drive DSIO low to request the bus
+    wait 1 gpio, 12         ; wait for DST2 to go high  (pin number hardcoded)
+    set pindirs, 0          ; release DSIO immediately
+
+    ; main loop
+.wrap_target
+start:
+    set pindirs, 0  side 1  ; tri-state DSIO while waiting for fifo data
+    pull                    ; block until there is a byte for us
+    set pindirs, 1          ; drive DSIO for transmission
+
+    wait 1 gpio, 13
+    wait 0 gpio, 13         ; latch to falling edge
+
+    set x, 7        side 0  ; load bit counter, transmit start bit
+bitloop:
+    wait 1 gpio, 13
+    wait 0 gpio, 13         ; latch to falling edge
+    out pins, 1             ; shift out one bit onto DSIO
+    jmp x-- bitloop
+    wait 1 gpio, 13
+    wait 0 gpio, 13         ; one final falling edge for the last bit
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+#include "hardware/clocks.h"
+
+static inline void dsio_tx_program_init(PIO pio, uint sm, uint offset,
+                                         uint pin_dsio, uint pin_dst2, uint pin_clkdiv) {
+    // Tell PIO to initially drive output-high on the selected pin, then map PIO
+    // onto that pin with the IO muxes.
+    pio_sm_set_pins_with_mask64(pio, sm, 1ull << pin_dsio, 1ull << pin_dsio);
+    pio_sm_set_pindirs_with_mask64(pio, sm, 1ull << pin_dsio, 1ull << pin_dsio);
+    pio_gpio_init(pio, pin_dsio);
+
+    pio_sm_config c = dsio_tx_program_get_default_config(offset);
+
+    // DSIO: out, set, sideset all on the same pin
+    sm_config_set_out_pins(&c, pin_dsio, 1);
+    sm_config_set_set_pins(&c, pin_dsio, 1);
+    sm_config_set_sideset_pins(&c, pin_dsio);
+
+    // JMP pin for DST2 check
+    sm_config_set_jmp_pin(&c, pin_dst2);
+
+    // Shift right, 8 bits, no autopull
+    sm_config_set_out_shift(&c, true, false, 8);
+
+    // Deeper FIFO as we're not doing any RX
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+
+    // Run at sysclk
+    sm_config_set_clkdiv(&c, 1.0f);
+
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}

@@ -1,0 +1,80 @@
+;
+; Half-duplex DSIO RX.
+; Designed to run on PIO1 SM0. No clock divider, it runs at sysclk.
+;
+; Captures everything on DSIO, including the TX echo, so the
+; firmware layer must handle discarding echoed bytes.
+;
+; Pin mapping:
+;   in_base         : DSIO
+;   jmp_pin         : DSIO
+;   hardcoded gpios : DST2 (GPIO 12), CLKDIV (GPIO 13)
+;
+; Waits for DST2 to be high before sampling, so it won't capture
+; garbage before the bus is active.
+;
+; Start bit detection: waits for DSIO to go low while CLKDIV is high
+; (i.e. the TX SM has started driving), then samples 8 bits on each
+; CLKDIV rising edge.
+;
+; Autopush: disabled. Explicit push per byte.
+; In shift: right, 8 bits.
+;
+
+.program dsio_rx
+
+    wait 1 gpio 12              ; wait for DST2 high indicating debug enabled
+
+.wrap_target
+rx_wait:
+    wait 0 gpio 13
+    wait 1 gpio 13              ; wait for rising edge
+
+    jmp pin rx_wait             ; DSIO high on rising edge = bus idle, retry
+                                ; DSIO low on rising edge  = TX has started a byte
+
+    set x, 7
+bitloop:                        ; loop 8 times
+    wait 0 gpio 13
+    wait 1 gpio 13              ; latch to rising edge
+    in pins, 1                  ; sample DSIO
+    jmp x-- bitloop
+
+    ; stop bit check
+    wait 0 gpio 13
+    wait 1 gpio 13              ; latch to rising edge
+    jmp pin good_stop
+
+    wait 1 pin, 0               ; framing error — wait for DSIO to go high again
+    jmp rx_wait
+
+good_stop:
+    push
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+#include "hardware/clocks.h"
+
+static inline void dsio_rx_program_init(PIO pio, uint sm, uint offset, uint pin_dsio) {
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_dsio, 1, false);
+    // DSIO is "owned"/driven by PIO0 (TX). PIO1 observes it read-only via in pins.
+    // do not call pio_gpio_init here, that would reassign ownership.
+
+    pio_sm_config c = dsio_rx_program_get_default_config(offset);
+
+    sm_config_set_in_pins(&c, pin_dsio);
+    sm_config_set_jmp_pin(&c, pin_dsio);
+
+    // Shift right, 8 bits, no autopush
+    sm_config_set_in_shift(&c, true, false, 8);
+
+    // Deeper FIFO as we're not doing any TX
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+
+    // Run at sysclk
+    sm_config_set_clkdiv(&c, 1.0f);
+
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}

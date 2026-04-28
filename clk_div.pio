@@ -1,0 +1,49 @@
+;
+; Clock divider: divides external DCLK by 8, outputs on CLKDIV pin.
+; Designed to run on PIO2 SM0. No clock divider, it runs at sysclk.
+;
+; Pin mapping:
+;   in_base : DCLK
+;   sideset : CLKDIV (divided output)
+;
+
+.program clk_div8
+.side_set 1
+
+    wait 0 pin 0    side 0  ; wait for DCLK low  (1)
+    wait 1 pin 0    side 0  ; wait for DCLK high (2)
+    wait 0 pin 0    side 0  ; wait for DCLK low  (3)
+    wait 1 pin 0    side 0  ; wait for DCLK high (4)
+    wait 0 pin 0    side 0  ; wait for DCLK low  (5)
+    wait 1 pin 0    side 0  ; wait for DCLK high (6)
+    wait 0 pin 0    side 0  ; wait for DCLK low  (7)
+    wait 1 pin 0    side 0  ; wait for DCLK high (8) — rising edge of divided clk
+    wait 0 pin 0    side 1  ; wait for DCLK low  (1)
+    wait 1 pin 0    side 1  ; wait for DCLK high (2)
+    wait 0 pin 0    side 1  ; wait for DCLK low  (3)
+    wait 1 pin 0    side 1  ; wait for DCLK high (4)
+    wait 0 pin 0    side 1  ; wait for DCLK low  (5)
+    wait 1 pin 0    side 1  ; wait for DCLK high (6)
+    wait 0 pin 0    side 1  ; wait for DCLK low  (7)
+    wait 1 pin 0    side 1  ; wait for DCLK high (8) — falling edge of divided clk
+
+% c-sdk {
+#include "hardware/gpio.h"
+#include "hardware/clocks.h"
+
+static inline void clk_div8_program_init(PIO pio, uint sm, uint offset, uint pin_dclk, uint pin_clkdiv) {
+    pio_sm_config c = clk_div8_program_get_default_config(offset);
+
+    sm_config_set_in_pins(&c, pin_dclk);
+    sm_config_set_sideset_pins(&c, pin_clkdiv);
+
+    // CLKDIV is driven by this SM
+    pio_gpio_init(pio, pin_clkdiv);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_clkdiv, 1, true);
+
+    // Run at sysclk
+    sm_config_set_clkdiv(&c, 1.0f);
+
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}
