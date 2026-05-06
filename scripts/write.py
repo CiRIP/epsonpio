@@ -30,6 +30,9 @@ def main():
     if "FLASH_ERASE" not in exports or "FLASH_LOAD" not in exports:
         print("Flasher is missing required exports!")
         return
+    
+    if "SET_CLK_SPEED" in exports:
+        exec(ser, exports["SET_CLK_SPEED"], r12=0x02)
 
     print("Wiping flash... This may take a while.")
     ret = exec(ser, exports["FLASH_ERASE"], r12=0x2000000, r13=0x00, r14=0x01)
