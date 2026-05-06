@@ -25,10 +25,14 @@ def main():
     write_byte(ser, 0x300018, 0x01)
 
     print("Uploading flasher...")
-    load_elf(ser, args.flasher)
+    exports = load_elf(ser, args.flasher)
+
+    if "FLASH_ERASE" not in exports or "FLASH_LOAD" not in exports:
+        print("Flasher is missing required exports!")
+        return
 
     print("Wiping flash... This may take a while.")
-    ret = exec(ser, 0x100, r12=0x2000000, r13=0x00, r14=0x01)
+    ret = exec(ser, exports["FLASH_ERASE"], r12=0x2000000, r13=0x00, r14=0x01)
 
     if ret[0] != 0:
         print(f"Failed to wipe flash: 0x{ret[0]:02x}")
@@ -44,7 +48,7 @@ def main():
             for chunk in iter(partial(f.read, 8), b""):
                 if chunk != b"\xff" * len(chunk):
                     r13, r14 = struct.unpack("<II", chunk.ljust(8, b"\x00"))
-                    exec(ser, 0x120, r12=0x2000000 + written, r13=r13, r14=r14)
+                    exec(ser, exports["FLASH_LOAD"], r12=0x2000000 + written, r13=r13, r14=r14)
                 written += 8
                 bar.update(8)
 

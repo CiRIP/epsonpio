@@ -7,7 +7,8 @@ from elftools.elf.elffile import ELFFile
 from utils import write_byte
 
 
-def load_elf(ser: serial.Serial, path: Path):
+def load_elf(ser: serial.Serial, path: Path) -> dict[str, int]:
+    exports = {}
     with path.open("rb") as f:
         elf = ELFFile(f)
         for section in [".text", ".data"]:
@@ -21,6 +22,14 @@ def load_elf(ser: serial.Serial, path: Path):
 
             for i, byte in enumerate(data):
                 write_byte(ser, addr + i, byte)
+
+        symtab = elf.get_section_by_name(".symtab")
+        if symtab is not None:
+            for sym in symtab.iter_symbols():
+                if sym["st_info"]["bind"] == "STB_GLOBAL" and sym["st_value"] != 0:
+                    exports[sym.name] = sym["st_value"]
+
+    return exports
 
 
 def main():

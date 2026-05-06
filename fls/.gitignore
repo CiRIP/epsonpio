@@ -1,0 +1,6 @@
+*.dump
+*.d
+*.o
+*.elf
+*.map
+*.ext0
