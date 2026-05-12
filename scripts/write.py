@@ -32,6 +32,7 @@ def main():
         return
     
     if "SET_CLK_SPEED" in exports:
+        print("Going fast!")
         exec(ser, exports["SET_CLK_SPEED"], r12=0x02)
 
     print("Wiping flash... This may take a while.")

@@ -29,11 +29,10 @@ def main():
 
     print("Uploading flasher...")
     exports = load_elf(ser, args.flasher)
-    if "SET_CLK_SPEED" not in exports:
-        print("Flasher is missing required exports!")
-        return
+    if "SET_CLK_SPEED" in exports:
+        print("Going fast!")
 
-    exec(ser, exports["SET_CLK_SPEED"], r12=0x02)
+        exec(ser, exports["SET_CLK_SPEED"], r12=0x02)
 
     total = args.end - args.start
     buf = bytearray()
