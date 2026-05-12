@@ -1,4 +1,5 @@
 import struct
+from typing import Union
 
 import serial
 
@@ -35,7 +36,7 @@ def write_word(ser: serial.Serial, address: int, value: int):
     return command(ser, 7, 0, address, value)
 
 
-_last_exec_address: int | None = None
+_last_exec_address: Union[int, None] = None
 
 
 def exec(
