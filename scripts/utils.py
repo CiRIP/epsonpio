@@ -17,7 +17,10 @@ def command(
     data2: int = 0,
 ):
     ser.write(struct.pack("<BBIII", id, arg, address, data1, data2))
-    return ser.read(8)
+    res = ser.read(8)
+    if len(res) != 8:
+        raise RuntimeError("Command timed out. Check your connection and try again.")
+    return res
 
 
 def read(ser: serial.Serial, address: int):

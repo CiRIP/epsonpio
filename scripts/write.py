@@ -7,7 +7,7 @@ import serial
 import tqdm
 
 from loadelf import load_elf
-from utils import exec, write_byte
+from utils import DEBUG_ROM_BASE, exec, write_byte
 
 
 def main():
@@ -24,18 +24,17 @@ def main():
     write_byte(ser, 0x300016, 0x00)
     write_byte(ser, 0x300018, 0x01)
 
+    print("Setting bus speed to SYSCLK...")
+    write_byte(ser, DEBUG_ROM_BASE + 0x18067, 0x02)
+
     print("Uploading flasher...")
     exports = load_elf(ser, args.flasher)
 
     if "FLASH_ERASE" not in exports or "FLASH_LOAD" not in exports:
         print("Flasher is missing required exports!")
         return
-    
-    if "SET_CLK_SPEED" in exports:
-        print("Going fast!")
-        exec(ser, exports["SET_CLK_SPEED"], r12=0x02)
 
-    print("Wiping flash... This may take a while.")
+    print("Wiping flash... (This will take approx. 45 seconds)")
     ret = exec(ser, exports["FLASH_ERASE"], r12=0x2000000, r13=0x00, r14=0x01)
 
     if ret[0] != 0:

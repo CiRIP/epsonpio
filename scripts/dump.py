@@ -4,8 +4,7 @@ import struct
 import argparse
 import sys
 from tqdm import tqdm
-from loadelf import load_elf
-from utils import write_byte, exec
+from utils import DEBUG_ROM_BASE, write_byte
 
 def command(ser, address):
     ser.write(struct.pack("<BBIII", 3, 0, address, 0, 0))
@@ -14,7 +13,6 @@ def command(ser, address):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("port")
-    parser.add_argument("flasher", type=Path)
     parser.add_argument("start", type=lambda x: int(x, 0))
     parser.add_argument("end", type=lambda x: int(x, 0))
     parser.add_argument("output")
@@ -27,12 +25,8 @@ def main():
     write_byte(ser, 0x300016, 0x00)
     write_byte(ser, 0x300018, 0x01)
 
-    print("Uploading flasher...")
-    exports = load_elf(ser, args.flasher)
-    if "SET_CLK_SPEED" in exports:
-        print("Going fast!")
-
-        exec(ser, exports["SET_CLK_SPEED"], r12=0x02)
+    print("Setting bus speed to SYSCLK...")
+    write_byte(ser, DEBUG_ROM_BASE + 0x18067, 0x02)
 
     total = args.end - args.start
     buf = bytearray()
