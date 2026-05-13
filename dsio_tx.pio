@@ -40,14 +40,20 @@ start:
     wait 1 gpio, 13
     wait 0 gpio, 13         ; latch to falling edge
 
-    set x, 7        side 0  ; load bit counter, transmit start bit
-bitloop:
+    set x, 7        side 0  ; load bit counter, assert start bit
     wait 1 gpio, 13
     wait 0 gpio, 13         ; latch to falling edge
+
+bitloop:
     out pins, 1             ; shift out one bit onto DSIO
-    jmp x-- bitloop
     wait 1 gpio, 13
-    wait 0 gpio, 13         ; one final falling edge for the last bit
+    wait 0 gpio, 13         ; latch to falling edge
+    
+    jmp x-- bitloop
+
+    nop side 1              ; assert stop bit
+    wait 1 gpio, 13
+    wait 0 gpio, 13         ; latch to falling edge
 .wrap
 
 % c-sdk {
