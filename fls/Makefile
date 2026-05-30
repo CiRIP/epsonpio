@@ -10,7 +10,7 @@ CFLAGS  = -B$(TOOL_DIR)/ -mc33pe -gstabs -medda32 -O1 -I$(TOOL_DIR)/include -fno
 ASFLAGS = -B$(TOOL_DIR)/ -mc33pe -c -xassembler-with-cpp -Wa,--gstabs -Wa,-medda32
 LDFLAGS = -Map $(TARGET).map -N -T $(TARGET).lds
 
-OBJS = entrypoint.o main.o
+OBJS = entrypoint.o main.o packbits.o crc.o
 
 .PHONY: all clean
 
@@ -23,6 +23,12 @@ entrypoint.o: entrypoint.s
 	$(GCC) $(ASFLAGS) -o $@ $<
 
 main.o: main.c
+	$(GCC) $(CFLAGS) -c -o $@ $<
+	
+packbits.o: packbits.c
+	$(GCC) $(CFLAGS) -c -o $@ $<
+
+crc.o: crc.c
 	$(GCC) $(CFLAGS) -c -o $@ $<
 
 clean:

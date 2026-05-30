@@ -29,6 +29,9 @@
 
 #define REG(addr) (*((volatile unsigned short *)(addr)))
 
+#include "dsio.h"
+#include "packbits.h"
+
 static unsigned long ctrl_reg = 0x2000000;
 
 static unsigned short dq_poll(unsigned long addr) { return REG(addr); }
@@ -120,3 +123,32 @@ int flash_load(unsigned long addr, unsigned long data1, unsigned long data2) {
 
     return SUCCESS;
 }
+
+/*---------------------------------------------------------------------------
+ Function name: DBG_PutC
+ Description  : Put char into debug serial interface.
+ Parameters   : ucData  (In)  - transmit data
+ Return value : none
+ *--------------------------------------------------------------------------*/
+void DBG_PutC(unsigned char ucData)
+{
+    while (!SSR_TDBE);
+    STDR_TXD = ucData;
+}
+
+/*---------------------------------------------------------------------------
+ Function name: DBG_GetC
+ Description  : Get char from debug serial interface
+ Parameters   : none
+ Return value : received data
+ *--------------------------------------------------------------------------*/
+unsigned char DBG_GetC(void)
+{
+    while (!SSR_RDBF);
+    return SRDR_RXD;
+}
+
+int dump(unsigned char *start, unsigned char *end) {
+    return packbits(start, end - start, DBG_PutC);
+}
+

@@ -2,47 +2,77 @@ from pathlib import Path
 import serial
 import struct
 import argparse
-import sys
+from binascii import crc32
 from tqdm import tqdm
-from utils import DEBUG_ROM_BASE, write_byte
+from loadelf import load_elf
+from utils import DEBUG_RAM_BASE, DEBUG_ROM_BASE, write_byte, write_word
+
 
 def command(ser, address):
     ser.write(struct.pack("<BBIII", 3, 0, address, 0, 0))
     return ser.read(8)
 
+
+SYSCLK_CHOICES = ["SYSCLK/4", "SYSCLK/2", "SYSCLK/1", "SYSCLK/8"]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("port")
+    parser.add_argument("flasher", type=Path)
     parser.add_argument("start", type=lambda x: int(x, 0))
     parser.add_argument("end", type=lambda x: int(x, 0))
     parser.add_argument("output")
+    parser.add_argument("--bus-speed", choices=SYSCLK_CHOICES, default="SYSCLK/2")
     args = parser.parse_args()
 
-    ser = serial.Serial(args.port, 921600, timeout=1)
+    ser = serial.Serial(args.port, 921600, timeout=5)
 
     print("Configuring misc registers...")
     write_byte(ser, 0x300020, 0x96)
     write_byte(ser, 0x300016, 0x00)
     write_byte(ser, 0x300018, 0x01)
 
-    print("Setting bus speed to SYSCLK...")
-    write_byte(ser, DEBUG_ROM_BASE + 0x18067, 0x02)
+    print(f"Setting bus speed to {args.bus_speed}...")
+    write_byte(ser, DEBUG_ROM_BASE + 0x18067, SYSCLK_CHOICES.index(args.bus_speed))
+
+    print("Uploading flasher...")
+    exports = load_elf(ser, args.flasher)
 
     total = args.end - args.start
     buf = bytearray()
+
     with tqdm(total=total, unit="B", unit_scale=True) as bar:
-        for address in range(args.start, args.end, 4):
-            response = command(ser, address)
-            expected = buf[-4:] if len(buf) >= 4 else None
-            if expected and expected != response[:4]:
-                print(f"\nIntegrity check failed at 0x{address:08x}", file=sys.stderr)
-                break
-            new_bytes = response if len(buf) == 0 else response[4:]
-            buf.extend(new_bytes)
-            bar.update(len(new_bytes))
+        write_word(ser, DEBUG_RAM_BASE + 100, exports["DUMP"])
+        ser.write(struct.pack("<BBIII", 1, 0, args.start, args.end, 0))
+
+        while len(buf) < total:
+            header = ser.read(1)
+            if not header:
+                raise RuntimeError("Corruption detected. Check your connection and try again.")
+            h = header[0]
+            if h == 128:
+                pass  # NOP
+            elif h < 128:
+                buf.extend(ser.read(h + 1))
+                bar.update(h + 1)
+            else:
+                byte = ser.read(1)[0]
+                buf.extend([byte] * (257 - h))
+                bar.update(257 - h)
+        
+    ret = ser.read(8)
+    if not ret:
+        raise RuntimeError("Dumping did not finish normally. Check your connection and try again.")
+    
+    crc, = struct.unpack("<I", ret[:4])
+
+    if crc != crc32(buf):
+        raise RuntimeError("CRC mismatch. Dump is corrupted.")
 
     with open(args.output, "wb") as f:
         f.write(buf)
+
 
 if __name__ == "__main__":
     main()
