@@ -1,4 +1,5 @@
 import argparse
+import time
 from functools import partial
 from pathlib import Path
 import struct
@@ -7,7 +8,7 @@ import serial
 import tqdm
 
 from loadelf import load_elf
-from utils import DEBUG_ROM_BASE, exec, write_byte
+from utils import DEBUG_ROM_BASE, exec, write_byte, packbits
 
 
 def main():
@@ -15,17 +16,19 @@ def main():
     parser.add_argument("port")
     parser.add_argument("flasher", type=Path)
     parser.add_argument("file", type=Path)
+    parser.add_argument("--start", default="0x2000000", type=lambda x: int(x, 0))
     args = parser.parse_args()
 
-    ser = serial.Serial(args.port, 921600, timeout=300)
+    ser = serial.Serial(args.port, 921600, timeout=60)
 
     print("Configuring misc registers...")
     write_byte(ser, 0x300020, 0x96)
     write_byte(ser, 0x300016, 0x00)
     write_byte(ser, 0x300018, 0x01)
+    # write_byte(ser, 0x302229, 0x00)
 
     print("Setting bus speed to SYSCLK...")
-    write_byte(ser, DEBUG_ROM_BASE + 0x18067, 0x02)
+    write_byte(ser, DEBUG_ROM_BASE + 0x18067, 0x03)
 
     print("Uploading flasher...")
     exports = load_elf(ser, args.flasher)
@@ -48,12 +51,11 @@ def main():
         written = 0
         total = args.file.stat().st_size
         with tqdm.tqdm(total=total, unit="B", unit_scale=True) as bar:
-            for chunk in iter(partial(f.read, 8), b""):
-                if chunk != b"\xff" * len(chunk):
-                    r13, r14 = struct.unpack("<II", chunk.ljust(8, b"\x00"))
-                    exec(ser, exports["FLASH_LOAD"], r12=0x2000000 + written, r13=r13, r14=r14)
-                written += 8
-                bar.update(8)
+            exec(ser, exports["BULK_LOAD"], r12=args.start, r13=args.start + total, skip_response=True)
+            for chunk in iter(partial(f.read, 32), b""):
+                ser.write(chunk)
+                bar.update(len(chunk))
+            ser.read(8)
 
 
 if __name__ == "__main__":

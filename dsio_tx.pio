@@ -34,7 +34,9 @@
 .wrap_target
 start:
     set pindirs, 0  side 1  ; tri-state DSIO while waiting for fifo data
+    irq next clear 0        ; signal TX end
     pull                    ; block until there is a byte for us
+    irq next set 0          ; signal TX start
     set pindirs, 1          ; drive DSIO for transmission
 
     wait 1 gpio, 13
@@ -51,7 +53,7 @@ bitloop:
     
     jmp x-- bitloop
 
-    nop side 1              ; assert stop bit
+    nop             side 1  ; assert stop bit
     wait 1 gpio, 13
     wait 0 gpio, 13         ; latch to falling edge
 .wrap

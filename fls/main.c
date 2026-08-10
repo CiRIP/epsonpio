@@ -32,6 +32,12 @@
 #include "dsio.h"
 #include "packbits.h"
 
+typedef unsigned char  uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned long  uint32_t;
+typedef unsigned long  size_t;
+#define NULL ((unsigned long)0)
+
 static unsigned long ctrl_reg = 0x2000000;
 
 static unsigned short dq_poll(unsigned long addr) { return REG(addr); }
@@ -130,9 +136,9 @@ int flash_load(unsigned long addr, unsigned long data1, unsigned long data2) {
  Parameters   : ucData  (In)  - transmit data
  Return value : none
  *--------------------------------------------------------------------------*/
-void DBG_PutC(unsigned char ucData)
-{
-    while (!SSR_TDBE);
+void DBG_PutC(unsigned char ucData) {
+    while (!SSR_TDBE)
+        ;
     STDR_TXD = ucData;
 }
 
@@ -142,13 +148,54 @@ void DBG_PutC(unsigned char ucData)
  Parameters   : none
  Return value : received data
  *--------------------------------------------------------------------------*/
-unsigned char DBG_GetC(void)
-{
-    while (!SSR_RDBF);
+unsigned char DBG_GetC(void) {
+    while (!SSR_RDBF)
+        ;
     return SRDR_RXD;
 }
 
-int dump(unsigned char *start, unsigned char *end) {
-    return packbits(start, end - start, DBG_PutC);
+int dump(unsigned char *start, unsigned char *end) { return packbits(start, end - start, DBG_PutC); }
+
+unsigned char *wpos;
+unsigned char wbuf[2];
+
+void emit(unsigned char c) {
+    wbuf[(unsigned long) wpos & 1L] = (c);
+
+    if ((unsigned long) wpos & 1L) {
+        unsigned long word = wbuf[0] | (unsigned long)wbuf[1] << 8;
+        program_word((unsigned long) wpos & ~1L, word);
+        verify((unsigned long) wpos & ~1L, word);
+    }
+
+    wpos++;
 }
 
+unsigned char buf[64];
+
+int bulk_load(unsigned char *start, unsigned char *end) {
+    int ret = SUCCESS;
+    unsigned int len = (unsigned int) (end - start);
+
+    // DBG_PutC(0x01); // ACK
+
+    for (unsigned long addr = (unsigned long) start; addr < ((unsigned long) end & ~1UL); addr += 2) {
+        unsigned short word = DBG_GetC() | (DBG_GetC() << 8);
+        program_word(addr, word);
+        ret |= verify(addr, word);
+    }
+
+    // for (unsigned long addr = (unsigned long) start; addr < ((unsigned long) end & ~1UL); addr += 2) {
+    //     unsigned short word = buf[addr - (unsigned long) start] | ((unsigned short)buf[addr - (unsigned long) start + 1] << 8);
+    //     program_word(addr, word);
+    //     ret |= verify(addr, word);
+    // }
+
+    // if ((unsigned long) end & 1L) {
+    //     unsigned char c = buf[(unsigned long) end - (unsigned long) start - 1] | 0xFF00UL;
+    //     program_word((unsigned long) end - 1, c);
+    //     ret |= verify((unsigned long) end - 1, c);
+    // }
+
+    return ret;
+}

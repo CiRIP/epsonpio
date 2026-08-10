@@ -95,12 +95,6 @@ int main()
             uint8_t b;
             tud_cdc_read(&b, 1);
             pio_sm_put(pio0, 0, (uint32_t)b);
-            // this is probably not the right way to handle echoes
-            // presumably we'd want to stop RX from even processing the TX's output
-            // but simply blocking on a byte from the RX FIFO seems to work well enough
-            // for now in practice, and is simpler than trying to coordinate the two
-            // state machines
-            pio_sm_get_blocking(pio1, 0); // discard echoed byte
         }
 
         // RX FIFO -> USB

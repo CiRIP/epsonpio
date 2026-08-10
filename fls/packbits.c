@@ -151,3 +151,45 @@ unsigned int packbits(const unsigned char *srcPtr, unsigned int srcCount, void (
 
     return ~crc;
 }
+
+/*----------------------------------------------------------------------------
+unpackbits decompresses a stream, reading one byte at a time via the get
+callback and emitting output one byte at a time via the put callback.
+
+get should return the next byte from the compressed stream.
+put receives each decompressed byte.
+
+destCount specifies the maximum number of bytes to decompress. Unpacking
+stops when destCount bytes have been emitted.
+
+Returns the number of bytes emitted.
+----------------------------------------------------------------------------*/
+unsigned int unpackbits(unsigned char (*get)(void), void (*put)(unsigned char), unsigned int destCount) {
+    unsigned char hdr;
+    unsigned char count;
+    unsigned int  destRemaining = destCount;
+
+    while (destRemaining != 0) {
+        hdr = get();
+
+        if (IS_DIFF(hdr)) {
+            count = DECODE_DIFF(hdr);
+            if (count > destRemaining)
+                count = destRemaining;
+            for (unsigned int i = 0; i < count; i++)
+                put(get());
+            destRemaining -= count;
+        } else if (IS_REPT(hdr)) {
+            count = DECODE_REPT(hdr);
+            if (count > destRemaining)
+                count = destRemaining;
+            unsigned char byte = get();
+            for (unsigned int i = 0; i < count; i++)
+                put(byte);
+            destRemaining -= count;
+        }
+        // header == 128 is a no-op, loop continues
+    }
+
+    return destCount - destRemaining;
+}

@@ -27,8 +27,10 @@
 
 .wrap_target
 rx_wait:
+    wait 0 irq 0                ; ensure we do not RX while TX is driving
     wait 0 gpio 13
     wait 1 gpio 13              ; wait for rising edge
+    wait 0 irq 0                ; ensure we do not RX while TX is driving
 
     jmp pin rx_wait             ; DSIO high on rising edge = bus idle, retry
                                 ; DSIO low on rising edge  = TX has started a byte
