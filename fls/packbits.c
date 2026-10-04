@@ -48,6 +48,7 @@ https://github.com/skirridsystems/packbits
 ******************************************************************************/
 
 #include "packbits.h"
+#include "crc.h"
 #include <stdbool.h>
 
 #define MIN_REPT 3   // Minimum run to compress between differ blocks
@@ -63,10 +64,6 @@ https://github.com/skirridsystems/packbits
 #define IS_REPT(h)     ((h) > 128)
 #define DECODE_DIFF(h) (unsigned char)((h) + 1)
 #define DECODE_REPT(h) (unsigned char)(1 - (h))
-
-static unsigned int lut[16] = {0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC, 0x76DC4190, 0x6B6B51F4,
-                               0x4DB26158, 0x5005713C, 0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C,
-                               0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C};
 
 /*----------------------------------------------------------------------------
 packbits compresses srcCount bytes from srcPtr, emitting output one byte
@@ -93,16 +90,16 @@ unsigned int packbits(const unsigned char *srcPtr, unsigned int srcCount, void (
     pendingPtr = srcPtr;
     lastByte   = *srcPtr++;
 
-    crc = lut[(crc ^ lastByte) & 0x0F] ^ (crc >> 4);
-    crc = lut[(crc ^ (lastByte >> 4)) & 0x0F] ^ (crc >> 4);
+    crc = crc32_lut[(crc ^ lastByte) & 0x0F] ^ (crc >> 4);
+    crc = crc32_lut[(crc ^ (lastByte >> 4)) & 0x0F] ^ (crc >> 4);
 
     ++bytesPending;
 
     while (--srcCount != 0) {
         currByte = *srcPtr++;
 
-        crc = lut[(crc ^ currByte) & 0x0F] ^ (crc >> 4);
-        crc = lut[(crc ^ (currByte >> 4)) & 0x0F] ^ (crc >> 4);
+        crc = crc32_lut[(crc ^ currByte) & 0x0F] ^ (crc >> 4);
+        crc = crc32_lut[(crc ^ (currByte >> 4)) & 0x0F] ^ (crc >> 4);
 
         ++bytesPending;
 

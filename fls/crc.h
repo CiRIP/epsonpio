@@ -22,6 +22,8 @@
 extern "C" {
 #endif
 
+extern const unsigned int crc32_lut[16];
+
 unsigned int crc32(const void *data, unsigned int length, unsigned int crc);
 
 #ifdef __cplusplus

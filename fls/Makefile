@@ -40,10 +40,10 @@ entrypoint.o: entrypoint.s
 main.o: main.c
 	$(GCC) $(CFLAGS) -c -o $@ $<
 	
-packbits.o: packbits.c
+packbits.o: packbits.c packbits.h crc.h
 	$(GCC) $(CFLAGS) -c -o $@ $<
 
-crc.o: crc.c
+crc.o: crc.c crc.h
 	$(GCC) $(CFLAGS) -c -o $@ $<
 
 clean:
