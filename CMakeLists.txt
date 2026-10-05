@@ -78,9 +78,6 @@ target_include_directories(epsonpio PRIVATE
 )
 
 # Add any user requested libraries
-target_link_libraries(epsonpio 
-        hardware_pio
-        )
 
 pico_add_extra_outputs(epsonpio)
 

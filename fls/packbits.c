@@ -90,16 +90,14 @@ unsigned int packbits(const unsigned char *srcPtr, unsigned int srcCount, void (
     pendingPtr = srcPtr;
     lastByte   = *srcPtr++;
 
-    crc = crc32_lut[(crc ^ lastByte) & 0x0F] ^ (crc >> 4);
-    crc = crc32_lut[(crc ^ (lastByte >> 4)) & 0x0F] ^ (crc >> 4);
+    crc = crc32_update(crc, lastByte);
 
     ++bytesPending;
 
     while (--srcCount != 0) {
         currByte = *srcPtr++;
 
-        crc = crc32_lut[(crc ^ currByte) & 0x0F] ^ (crc >> 4);
-        crc = crc32_lut[(crc ^ (currByte >> 4)) & 0x0F] ^ (crc >> 4);
+        crc = crc32_update(crc, currByte);
 
         ++bytesPending;
 
@@ -150,43 +148,20 @@ unsigned int packbits(const unsigned char *srcPtr, unsigned int srcCount, void (
 }
 
 /*----------------------------------------------------------------------------
-unpackbits decompresses a stream, reading one byte at a time via the get
-callback and emitting output one byte at a time via the put callback.
-
-get should return the next byte from the compressed stream.
-put receives each decompressed byte.
-
-destCount specifies the maximum number of bytes to decompress. Unpacking
-stops when destCount bytes have been emitted.
-
-Returns the number of bytes emitted.
+unpackbits decompresses the stream between src and end, emitting output one
+byte at a time via the put callback.
 ----------------------------------------------------------------------------*/
-unsigned int unpackbits(unsigned char (*get)(void), void (*put)(unsigned char), unsigned int destCount) {
-    unsigned char hdr;
-    unsigned char count;
-    unsigned int  destRemaining = destCount;
-
-    while (destRemaining != 0) {
-        hdr = get();
+void unpackbits(const unsigned char *src, const unsigned char *end, void (*put)(unsigned char)) {
+    while (src < end) {
+        unsigned char hdr = *src++;
 
         if (IS_DIFF(hdr)) {
-            count = DECODE_DIFF(hdr);
-            if (count > destRemaining)
-                count = destRemaining;
-            for (unsigned int i = 0; i < count; i++)
-                put(get());
-            destRemaining -= count;
+            for (unsigned int count = DECODE_DIFF(hdr); count; count--)
+                put(*src++);
         } else if (IS_REPT(hdr)) {
-            count = DECODE_REPT(hdr);
-            if (count > destRemaining)
-                count = destRemaining;
-            unsigned char byte = get();
-            for (unsigned int i = 0; i < count; i++)
-                put(byte);
-            destRemaining -= count;
+            for (unsigned int count = DECODE_REPT(hdr); count; count--)
+                put(*src);
+            src++;
         }
-        // header == 128 is a no-op, loop continues
     }
-
-    return destCount - destRemaining;
 }

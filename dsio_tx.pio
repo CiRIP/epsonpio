@@ -78,7 +78,7 @@ bitloop:
 #include "hardware/clocks.h"
 
 static inline void dsio_tx_program_init(PIO pio, uint sm, uint offset,
-                                         uint pin_dsio, uint pin_dst2, uint pin_clkdiv) {
+                                         uint pin_dsio, uint pin_dst2) {
     // Tell PIO to initially drive output-high on the selected pin, then map PIO
     // onto that pin with the IO muxes.
     pio_sm_set_pins_with_mask64(pio, sm, 1ull << pin_dsio, 1ull << pin_dsio);

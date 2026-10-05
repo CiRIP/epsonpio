@@ -17,8 +17,7 @@
 ; Half-duplex DSIO RX.
 ; Designed to run on PIO1 SM0. No clock divider, it runs at sysclk.
 ;
-; Captures everything on DSIO, including the TX echo, so the
-; firmware layer must handle discarding echoed bytes.
+; Gated off by the TX SM while it drives the line, so no echo.
 ;
 ; Pin mapping:
 ;   in_base         : DSIO

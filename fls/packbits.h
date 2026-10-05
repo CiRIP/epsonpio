@@ -31,6 +31,6 @@ https://github.com/skirridsystems/packbit
 #define _PACKBITS_H_
 
 unsigned int packbits(const unsigned char *srcPtr, unsigned int srcCount, void (*put)(unsigned char));
-unsigned int unpackbits(unsigned char (*get)(void), void (*put)(unsigned char), unsigned int destCount);
+void         unpackbits(const unsigned char *src, const unsigned char *end, void (*put)(unsigned char));
 
 #endif

@@ -7,390 +7,452 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>S1C33 memory dump</title>
+  <title>S1C33 flasher</title>
+  <script src="payload.js"></script>
 </head>
 <body>
-  <h1>S1C33 memory dump</h1>
+  <h1>S1C33 flasher</h1>
 
-  <p id="support"></p>
+  <p><button id="connect">Connect</button></p>
 
-  <p>
-    <button id="connect" type="button">Connect serial port</button>
-    <span id="connection">Not connected</span>
-  </p>
-
-  <form id="dump-form">
-    <p>
-      <label>Flasher ELF <input id="flasher" type="file" required></label>
-    </p>
-    <p>
-      <label>Start address <input id="start" value="0x00000000" required></label>
-    </p>
-    <p>
-      <label>End address (exclusive) <input id="end" value="0x00000100" required></label>
-    </p>
+  <fieldset id="controls" disabled>
     <p>
       <label>Bus speed
         <select id="bus-speed">
-          <option>SYSCLK/4</option>
-          <option selected>SYSCLK/2</option>
-          <option>SYSCLK/1</option>
-          <option>SYSCLK/8</option>
+          <option value="0" selected>SYSCLK/4</option>
+          <option value="1">SYSCLK/2</option>
+          <option value="2">SYSCLK/1</option>
+          <option value="3">SYSCLK/8</option>
         </select>
       </label>
     </p>
-    <p>
-      <label>Download filename <input id="filename" value="dump.bin" required></label>
-    </p>
-    <button id="dump" type="submit" disabled>Dump memory</button>
-  </form>
 
-  <p><progress id="progress" value="0" max="1"></progress> <span id="progress-text"></span></p>
-  <pre id="status">Ready.</pre>
+    <h2>Read</h2>
+    <p>
+      <label>Start <input id="read-start" value="0x2000000"></label>
+      <label>End <input id="read-end" value="0x2800000"></label>
+      <button id="read">Read</button>
+    </p>
+
+    <h2>Write</h2>
+    <p>
+      <label>File <input id="write-file" type="file"></label>
+      <label>Start <input id="write-start" value="0x2000000"></label>
+      <label><input id="erase" type="checkbox" checked> Erase chip first</label>
+      <button id="write">Write</button>
+    </p>
+  </fieldset>
+
+  <p><progress id="progress" value="0"></progress> <span id="progress-text"></span></p>
+  <pre id="log"></pre>
 
   <script>
     "use strict";
 
-    const BAUD_RATE = 921600;
-    const COMMAND_TIMEOUT_MS = 5000;
-    const DEBUG_ROM_BASE = 0x60000;
-    const DEBUG_RAM_BASE = 0x84780;
-    const SYSCLK_CHOICES = ["SYSCLK/4", "SYSCLK/2", "SYSCLK/1", "SYSCLK/8"];
+    const DEBUG_ROM_BASE  = 0x60000;
+    const DEBUG_RAM_BASE  = 0x84780;
+    const PAYLOAD_ADDRESS = 0x100;
+    const FLASH           = 0x2000000;
 
-    const connectButton = document.querySelector("#connect");
-    const dumpButton = document.querySelector("#dump");
-    const statusElement = document.querySelector("#status");
-    const connectionElement = document.querySelector("#connection");
-    const progressElement = document.querySelector("#progress");
-    const progressText = document.querySelector("#progress-text");
-    const supportElement = document.querySelector("#support");
+    const EXEC = 1, WRITE_BYTE = 2, WRITE_WORD = 7, PING = 9;
+    const READ = 0, ERASE = 1, MAP = 2, WRITE = 3;
+    const OK = 0, BAD_FRAME = 1;
+    const STATUS = ["ok", "write CRC mismatch", "flash verify failed", "could not map write buffer"];
 
-    let port = null;
-    let reader = null;
-    let writer = null;
-    let pendingInput = new Uint8Array(0);
+    const FLAG = 0x7E, ESCAPE = 0x7D, READY = 0xA5;
 
-    if (!("serial" in navigator)) {
-      supportElement.textContent = "Web Serial is not supported by this browser. Use a Chromium-based browser on localhost or HTTPS.";
-      connectButton.disabled = true;
-    } else {
-      supportElement.textContent = "Web Serial requires a Chromium-based browser and a secure context (HTTPS or localhost).";
+    const BUFFER_SIZE   = 0x3000;
+    const WRITE_CHUNK   = BUFFER_SIZE - BUFFER_SIZE / 128;
+    const READ_CHUNK    = 0x10000;
+    const RETRIES       = 5;
+    const TIMEOUT       = 5000;
+    const ERASE_TIMEOUT = 120000;
+
+    const $ = id => document.getElementById(id);
+
+    const payload = Uint8Array.from(PAYLOAD.match(/../g), byte => parseInt(byte, 16));
+
+    const CRC_TABLE = Uint32Array.from({length: 256}, (_, n) => {
+      for (let bit = 0; bit < 8; bit++)
+        n = n & 1 ? 0xEDB88320 ^ (n >>> 1) : n >>> 1;
+      return n;
+    });
+
+    const crc32 = (crc, byte) => CRC_TABLE[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
+
+    let port = null, reader, writer, pending;
+    let rx = new Uint8Array(), rxPos = 0;
+    let busy = false;
+
+    const log = message => $("log").textContent += message + "\n";
+
+    const hex = value => value.toString(16).padStart(8, "0");
+
+    const fatal = message => Object.assign(new Error(message), {fatal: true});
+
+    function number(id) {
+      const value = Number($(id).value);
+
+      if (!Number.isInteger(value) || value < 0 || value > 0xFFFFFFFF)
+        throw new Error(`invalid ${id}`);
+
+      return value;
     }
 
-    function setStatus(message) {
-      statusElement.textContent = message;
+    function duration(seconds) {
+      const s = Math.ceil(seconds);
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     }
 
-    function parseAddress(value, name) {
-      const text = value.trim();
-      if (!/^(?:0[xX][0-9a-fA-F]+|[0-9]+)$/.test(text)) {
-        throw new Error(`${name} must be a decimal or 0x-prefixed hexadecimal integer.`);
-      }
-      const number = Number(text);
-      if (!Number.isSafeInteger(number) || number < 0 || number > 0xffffffff) {
-        throw new Error(`${name} must be between 0 and 0xffffffff.`);
-      }
-      return number;
+    function progress(done, total, started, eta) {
+      const seconds = (performance.now() - started) / 1000;
+      const left = eta ? `, ${duration(seconds * (total - done) / done)} left` : "";
+
+      $("progress").value = done / total;
+      $("progress-text").textContent = `${done} / ${total} bytes, ${(done / 1024 / seconds).toFixed(1)} KiB/s${left}`;
     }
 
-    function concatBytes(left, right) {
-      const result = new Uint8Array(left.length + right.length);
-      result.set(left);
-      result.set(right, left.length);
-      return result;
+    function download(data, name) {
+      const link = document.createElement("a");
+
+      link.href = URL.createObjectURL(new Blob([data]));
+      link.download = name;
+      link.click();
+
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
     }
 
-    async function readExactly(length, timeoutMs = COMMAND_TIMEOUT_MS) {
-      if (!reader) throw new Error("Serial port is not connected.");
-      const output = new Uint8Array(length);
-      let offset = 0;
-      const deadline = performance.now() + timeoutMs;
+    async function fill(timeout) {
+      let timer;
 
-      if (pendingInput.length) {
-        const count = Math.min(length, pendingInput.length);
-        output.set(pendingInput.subarray(0, count));
-        pendingInput = pendingInput.slice(count);
-        offset = count;
-      }
+      pending ??= reader.read();
+      const result = await Promise.race([pending, new Promise(resolve => timer = setTimeout(resolve, timeout))]);
+      clearTimeout(timer);
 
-      while (offset < length) {
-        const remaining = deadline - performance.now();
-        if (remaining <= 0) throw new Error("Serial read timed out. Check the connection and try again.");
+      if (!result)
+        return false;
 
-        let timer;
-        const timeout = new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error("Serial read timed out. Check the connection and try again.")), remaining);
-        });
-        let result;
-        try {
-          result = await Promise.race([reader.read(), timeout]);
-        } finally {
-          clearTimeout(timer);
-        }
-        if (result.done) throw new Error("The serial port was disconnected.");
-        if (!result.value || result.value.length === 0) continue;
+      pending = null;
 
-        const count = Math.min(length - offset, result.value.length);
-        output.set(result.value.subarray(0, count), offset);
-        offset += count;
-        if (count < result.value.length) {
-          pendingInput = concatBytes(pendingInput, result.value.subarray(count));
-        }
-      }
-      return output;
+      if (result.done)
+        throw new Error("serial port closed");
+
+      rx = result.value;
+      rxPos = 0;
+
+      return true;
     }
 
-    async function writeAll(bytes) {
-      if (!writer) throw new Error("Serial port is not connected.");
-      await writer.write(bytes);
+    async function receive(timeout = TIMEOUT) {
+      while (rxPos === rx.length)
+        if (!await fill(timeout))
+          throw new Error("timed out");
+
+      return rx[rxPos++];
     }
 
-    function makeCommand(id, arg = 0, address = 0, data1 = 0, data2 = 0) {
-      const bytes = new Uint8Array(14);
-      const view = new DataView(bytes.buffer);
+    async function drain() {
+      do rxPos = rx.length;
+      while (await fill(200));
+    }
+
+    const send = bytes => writer.write(Uint8Array.from(bytes));
+
+    function packet(id, arg, a = 0, b = 0) {
+      const view = new DataView(new ArrayBuffer(14));
+
       view.setUint8(0, id);
       view.setUint8(1, arg);
-      view.setUint32(2, address >>> 0, true);
-      view.setUint32(6, data1 >>> 0, true);
-      view.setUint32(10, data2 >>> 0, true);
-      return bytes;
+      view.setUint32(2, a, true);
+      view.setUint32(6, b, true);
+
+      return new Uint8Array(view.buffer);
     }
 
-    async function command(id, arg = 0, address = 0, data1 = 0, data2 = 0) {
-      await writeAll(makeCommand(id, arg, address, data1, data2));
-      return readExactly(8);
+    async function reply(timeout) {
+      const bytes = new Uint8Array(8);
+
+      for (let i = 0; i < bytes.length; i++)
+        bytes[i] = await receive(timeout);
+
+      return new DataView(bytes.buffer).getUint32(0, true);
     }
 
-    const writeByte = (address, value) => command(2, 0, address, value);
-    const writeWord = (address, value) => command(7, 0, address, value);
-
-    function parseElf(arrayBuffer) {
-      const bytes = new Uint8Array(arrayBuffer);
-      if (bytes.length < 52 || bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
-        throw new Error("The selected flasher is not an ELF file.");
-      }
-      if (bytes[4] !== 1) throw new Error("Only 32-bit ELF files are supported.");
-      if (bytes[5] !== 1 && bytes[5] !== 2) throw new Error("The ELF file has an unsupported byte order.");
-
-      const littleEndian = bytes[5] === 1;
-      const view = new DataView(arrayBuffer);
-      const u16 = offset => view.getUint16(offset, littleEndian);
-      const u32 = offset => view.getUint32(offset, littleEndian);
-      const sectionOffset = u32(32);
-      const sectionEntrySize = u16(46);
-      const sectionCount = u16(48);
-      const namesIndex = u16(50);
-      if (sectionEntrySize < 40 || sectionOffset + sectionEntrySize * sectionCount > bytes.length || namesIndex >= sectionCount) {
-        throw new Error("The ELF section table is invalid.");
-      }
-
-      const rawSections = [];
-      for (let index = 0; index < sectionCount; index++) {
-        const offset = sectionOffset + index * sectionEntrySize;
-        rawSections.push({
-          nameOffset: u32(offset), type: u32(offset + 4), address: u32(offset + 12),
-          offset: u32(offset + 16), size: u32(offset + 20), link: u32(offset + 24),
-          entrySize: u32(offset + 36)
-        });
-      }
-
-      function sectionData(section) {
-        if (section.offset + section.size > bytes.length) throw new Error("An ELF section extends beyond the file.");
-        return bytes.subarray(section.offset, section.offset + section.size);
-      }
-
-      function stringAt(table, offset) {
-        if (offset >= table.length) return "";
-        let end = offset;
-        while (end < table.length && table[end] !== 0) end++;
-        return new TextDecoder().decode(table.subarray(offset, end));
-      }
-
-      const sectionNames = sectionData(rawSections[namesIndex]);
-      const sections = rawSections.map(section => ({...section, name: stringAt(sectionNames, section.nameOffset)}));
-      const loadSections = [".text", ".data"].map(name => sections.find(section => section.name === name)).filter(Boolean);
-
-      const exports = {};
-      const symbolTable = sections.find(section => section.name === ".symtab");
-      if (symbolTable) {
-        if (symbolTable.link >= sections.length) throw new Error("The ELF symbol string table is invalid.");
-        const symbols = sectionData(symbolTable);
-        const strings = sectionData(sections[symbolTable.link]);
-        const entrySize = symbolTable.entrySize || 16;
-        if (entrySize < 16) throw new Error("The ELF symbol table is invalid.");
-        for (let offset = 0; offset + 16 <= symbols.length; offset += entrySize) {
-          const fileOffset = symbolTable.offset + offset;
-          const nameOffset = u32(fileOffset);
-          const value = u32(fileOffset + 4);
-          const info = bytes[fileOffset + 12];
-          if ((info >> 4) === 1 && value !== 0) exports[stringAt(strings, nameOffset)] = value;
-        }
-      }
-      return {bytes, sections: loadSections, exports};
+    async function command(id, arg, a, b, timeout) {
+      await send(packet(id, arg, a, b));
+      return reply(timeout);
     }
 
-    async function uploadElf(elf) {
-      let uploaded = 0;
-      const total = elf.sections.reduce((sum, section) => sum + section.size, 0);
-      for (const section of elf.sections) {
-        setStatus(`Uploading ${section.name}...`);
-        const data = elf.bytes.subarray(section.offset, section.offset + section.size);
-        for (let index = 0; index < data.length; index++) {
-          await writeByte((section.address + index) >>> 0, data[index]);
-          uploaded++;
-          progressElement.value = total ? uploaded / total : 1;
-          progressText.textContent = `${uploaded} / ${total} upload bytes`;
+    async function poke(id, address, value) {
+      if (await command(id, 0, address, value) !== id)
+        throw new Error("monitor out of sync");
+    }
+
+    function check(status) {
+      if (status !== OK)
+        throw fatal(STATUS[status] ?? `unknown status ${status}`);
+    }
+
+    async function retry(task) {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await task();
+        } catch (error) {
+          if (error.fatal || attempt === RETRIES)
+            throw error;
+
+          log(`${error.message}, retrying`);
+          await drain();
         }
       }
     }
 
-    const CRC_TABLE = (() => {
-      const table = new Uint32Array(256);
-      for (let index = 0; index < 256; index++) {
-        let value = index;
-        for (let bit = 0; bit < 8; bit++) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
-        table[index] = value >>> 0;
-      }
-      return table;
-    })();
+    const call = (op, a, b, timeout) => retry(async () => check(await command(EXEC, op, a, b, timeout)));
 
-    function crc32(bytes) {
-      let crc = 0xffffffff;
-      for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-      return (crc ^ 0xffffffff) >>> 0;
-    }
+    function packbits(data) {
+      const out = [];
 
-    async function receiveDump(total) {
-      const output = new Uint8Array(total);
-      let offset = 0;
-      while (offset < total) {
-        const header = (await readExactly(1))[0];
-        if (header === 128) continue;
+      for (let i = 0; i < data.length; ) {
+        let run = 1;
+        while (run < 128 && data[i + run] === data[i])
+          run++;
 
-        if (header < 128) {
-          const count = header + 1;
-          if (offset + count > total) throw new Error("Compressed stream expands beyond the requested range.");
-          output.set(await readExactly(count), offset);
-          offset += count;
-        } else {
-          const count = 257 - header;
-          if (offset + count > total) throw new Error("Compressed stream expands beyond the requested range.");
-          output.fill((await readExactly(1))[0], offset, offset + count);
-          offset += count;
+        if (run >= 3) {
+          out.push(257 - run, data[i]);
+          i += run;
+          continue;
         }
-        progressElement.value = total ? offset / total : 1;
-        progressText.textContent = `${offset} / ${total} dump bytes`;
+
+        const start = i;
+        while (i < data.length && i - start < 128 && !(data[i] === data[i + 1] && data[i] === data[i + 2]))
+          i++;
+
+        out.push(i - start - 1, ...data.subarray(start, i));
       }
-      return output;
+
+      return Uint8Array.from(out);
     }
 
-    function download(bytes, filename) {
-      const url = URL.createObjectURL(new Blob([bytes], {type: "application/octet-stream"}));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    function frame(bytes) {
+      const out = [];
+
+      for (const byte of bytes) {
+        if (byte === FLAG || byte === ESCAPE)
+          out.push(ESCAPE, byte ^ 0x20);
+        else
+          out.push(byte);
+      }
+
+      out.push(FLAG);
+
+      return out;
+    }
+
+    async function setup() {
+      await poke(WRITE_BYTE, 0x300020, 0x96);
+      await poke(WRITE_BYTE, 0x300016, 0x00);
+      await poke(WRITE_BYTE, 0x300018, 0x01);
+      await poke(WRITE_BYTE, DEBUG_ROM_BASE + 0x18067, Number($("bus-speed").value));
+
+      for (let i = 0; i < payload.length; i += 4) {
+        const word = payload[i] | payload[i + 1] << 8 | payload[i + 2] << 16 | payload[i + 3] << 24;
+        await poke(WRITE_WORD, PAYLOAD_ADDRESS + i, word);
+      }
+
+      await poke(WRITE_WORD, DEBUG_RAM_BASE + 100, PAYLOAD_ADDRESS);
+
+      const echo = await readChunk(PAYLOAD_ADDRESS, payload.length);
+      if (echo.some((byte, i) => byte !== payload[i]))
+        throw new Error("payload upload corrupted");
+    }
+
+    async function readChunk(address, length) {
+      const data = new Uint8Array(length);
+      let crc = -1;
+
+      await send(packet(EXEC, READ, address, length));
+
+      for (let i = 0; i < length; ) {
+        const header = await receive();
+        if (header === 128)
+          continue;
+
+        const count = header < 128 ? header + 1 : 257 - header;
+        if (i + count > length)
+          throw new Error("read stream overrun");
+
+        const repeat = header > 128 ? await receive() : undefined;
+
+        for (const end = i + count; i < end; i++) {
+          data[i] = repeat ?? await receive();
+          crc = crc32(crc, data[i]);
+        }
+      }
+
+      if (await reply() !== ~crc >>> 0)
+        throw new Error("read CRC mismatch");
+
+      return data;
+    }
+
+    async function writeChunk(address, packed) {
+      await send(packet(EXEC, WRITE, address, ~packed.reduce(crc32, -1) >>> 0));
+
+      if (await receive() !== READY)
+        throw new Error("payload not ready");
+
+      await send(frame(packed));
+      const status = await reply();
+
+      if (status === BAD_FRAME)
+        throw new Error(STATUS[status]);
+
+      check(status);
+    }
+
+    async function read() {
+      const start = number("read-start");
+      const length = number("read-end") - start;
+
+      if (length <= 0)
+        throw new Error("end must be after start");
+
+      const data = new Uint8Array(length);
+      const started = performance.now();
+
+      for (let offset = 0; offset < length; offset += READ_CHUNK) {
+        const size = Math.min(READ_CHUNK, length - offset);
+
+        data.set(await retry(() => readChunk(start + offset, size)), offset);
+        progress(offset + size, length, started);
+      }
+
+      download(data, `${hex(start)}-${hex(start + length)}.bin`);
+    }
+
+    async function write() {
+      const file = $("write-file").files[0];
+      const start = number("write-start");
+
+      if (!file)
+        throw new Error("no file selected");
+      if (start % 2)
+        throw new Error("start must be even");
+
+      const data = new Uint8Array(file.size + file.size % 2).fill(0xFF);
+      data.set(new Uint8Array(await file.arrayBuffer()));
+
+      const chunks = [];
+      for (let offset = 0; offset < data.length; offset += WRITE_CHUNK) {
+        const chunk = data.subarray(offset, offset + WRITE_CHUNK);
+
+        if (chunk.some(byte => byte !== 0xFF))
+          chunks.push({address: start + offset, packed: packbits(chunk)});
+      }
+
+      const total = chunks.reduce((sum, chunk) => sum + chunk.packed.length, 0);
+
+      if ($("erase").checked) {
+        log("Erasing chip...");
+        await call(ERASE, FLASH, 0, ERASE_TIMEOUT);
+      }
+
+      await call(MAP);
+
+      log(`Writing ${total} packed bytes...`);
+      const started = performance.now();
+      let done = 0;
+
+      for (const {address, packed} of chunks) {
+        await retry(() => writeChunk(address, packed));
+
+        done += packed.length;
+        progress(done, total, started, true);
+      }
+    }
+
+    async function run(task) {
+      busy = true;
+      update();
+
+      $("log").textContent = "";
+      $("progress").value = 0;
+      $("progress-text").textContent = "";
+
+      try {
+        await drain();
+
+        if (await command(PING, 0, 0, 0, 500).catch(() => 0) !== PING)
+          throw new Error("debug link out of sync, replug the Pico and try again");
+
+        log("Uploading payload...");
+        await retry(setup);
+
+        await task();
+        log("Done.");
+      } catch (error) {
+        log(`Error: ${error.message}`);
+      } finally {
+        busy = false;
+        update();
+      }
+    }
+
+    async function connect() {
+      const selected = await navigator.serial.requestPort();
+
+      await selected.open({baudRate: 921600});
+
+      reader = selected.readable.getReader();
+      writer = selected.writable.getWriter();
+      pending = null;
+      rx = new Uint8Array();
+      rxPos = 0;
+      port = selected;
     }
 
     async function disconnect() {
-      if (reader) { reader.releaseLock(); reader = null; }
-      if (writer) { writer.releaseLock(); writer = null; }
-      if (port) { await port.close(); port = null; }
-      pendingInput = new Uint8Array(0);
-      connectionElement.textContent = "Not connected";
-      connectButton.textContent = "Connect serial port";
-      dumpButton.disabled = true;
+      const closing = port;
+      port = null;
+
+      await reader.cancel();
+      reader.releaseLock();
+      writer.releaseLock();
+      await closing.close();
     }
 
-    connectButton.addEventListener("click", async () => {
-      connectButton.disabled = true;
+    function update() {
+      $("connect").textContent = port ? "Disconnect" : "Connect";
+      $("connect").disabled = busy || !navigator.serial;
+      $("controls").disabled = busy || !port;
+    }
+
+    $("connect").onclick = async () => {
       try {
-        if (port) {
-          await disconnect();
-          setStatus("Disconnected.");
-        } else {
-          port = await navigator.serial.requestPort();
-          await port.open({baudRate: BAUD_RATE});
-          reader = port.readable.getReader();
-          writer = port.writable.getWriter();
-          pendingInput = new Uint8Array(0);
-          connectionElement.textContent = "Connected at 921600 baud";
-          connectButton.textContent = "Disconnect";
-          dumpButton.disabled = false;
-          setStatus("Connected.");
-        }
+        await (port ? disconnect() : connect());
       } catch (error) {
-        if (port && (!reader || !writer)) {
-          try { await disconnect(); } catch (_) { /* retain the original error */ }
-        }
-        setStatus(`Error: ${error.message}`);
-      } finally {
-        connectButton.disabled = false;
+        log(`Error: ${error.message}`);
       }
-    });
 
-    document.querySelector("#dump-form").addEventListener("submit", async event => {
-      event.preventDefault();
-      dumpButton.disabled = true;
-      connectButton.disabled = true;
-      progressElement.value = 0;
-      progressText.textContent = "";
-      try {
-        const file = document.querySelector("#flasher").files[0];
-        if (!file) throw new Error("Select a flasher ELF file.");
-        const start = parseAddress(document.querySelector("#start").value, "Start address");
-        const end = parseAddress(document.querySelector("#end").value, "End address");
-        if (end <= start) throw new Error("End address must be greater than start address.");
-        const total = end - start;
-        const elf = parseElf(await file.arrayBuffer());
-        if (elf.exports.DUMP === undefined) throw new Error("The flasher ELF does not export a global DUMP symbol.");
+      update();
+    };
 
-        setStatus("Configuring miscellaneous registers...");
-        await writeByte(0x300020, 0x96);
-        await writeByte(0x300016, 0x00);
-        await writeByte(0x300018, 0x01);
-
-        const busSpeed = document.querySelector("#bus-speed").value;
-        setStatus(`Setting bus speed to ${busSpeed}...`);
-        await writeByte(DEBUG_ROM_BASE + 0x18067, SYSCLK_CHOICES.indexOf(busSpeed));
-
-        await uploadElf(elf);
-        setStatus("Dumping memory...");
-        progressElement.value = 0;
-        await writeWord(DEBUG_RAM_BASE + 100, elf.exports.DUMP);
-        await writeAll(makeCommand(1, 0, start, end, 0));
-        const output = await receiveDump(total);
-
-        const response = await readExactly(8);
-        const expectedCrc = new DataView(response.buffer, response.byteOffset, response.byteLength).getUint32(0, true);
-        const actualCrc = crc32(output);
-        if (actualCrc !== expectedCrc) {
-          throw new Error(`CRC mismatch (device 0x${expectedCrc.toString(16).padStart(8, "0")}, local 0x${actualCrc.toString(16).padStart(8, "0")}).`);
-        }
-
-        download(output, document.querySelector("#filename").value.trim() || "dump.bin");
-        setStatus(`Complete. Received ${total} bytes; CRC32 0x${actualCrc.toString(16).padStart(8, "0")}.`);
-      } catch (error) {
-        setStatus(`Error: ${error.message}`);
-      } finally {
-        dumpButton.disabled = !port;
-        connectButton.disabled = false;
-      }
-    });
+    $("read").onclick = () => run(read);
+    $("write").onclick = () => run(write);
 
     navigator.serial?.addEventListener("disconnect", event => {
-      if (event.port === port || event.target === port) {
-        reader = null;
-        writer = null;
-        port = null;
-        pendingInput = new Uint8Array(0);
-        connectionElement.textContent = "Disconnected";
-        connectButton.textContent = "Connect serial port";
-        dumpButton.disabled = true;
-        setStatus("The serial device was disconnected.");
-      }
+      if (event.target !== port)
+        return;
+
+      port = null;
+      update();
+      log("Device disconnected.");
     });
+
+    if (!navigator.serial)
+      log("Web Serial is not available, use a Chromium-based browser.");
+
+    update();
   </script>
 </body>
 </html>

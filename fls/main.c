@@ -15,204 +15,153 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
-#define ADDR_COM1 (0x555 << 1)
-#define ADDR_COM2 (0x2AA << 1)
-
-#define ERASE1  0xAA
-#define ERASE2  0x55
-#define ERASE3  0x80
-#define ERASE4  0xAA
-#define ERASE5  0x55
-#define ERASE6C 0x10
-#define ERASE6B 0x30
-#define ERASE6S 0x50
-
-#define PROG1 0xAA
-#define PROG2 0x55
-#define PROG3 0xA0
-
-#define SUCCESS  0
-#define E_VERIFY 1
-#define E_PARAM1 3
-#define E_PARAM2 4
-#define E_CHANGE 5
-#define E_REGERR 6
-
-#define BLKSIZE 65536
-#define BLKMAX  128
-#define INIDAT  0xFFFF
-#define MSKLOW  0xFFFF
-#define DQ6     0x0040
-
-#define REG(addr) (*((volatile unsigned short *)(addr)))
-
-#include "dsio.h"
+#include "crc.h"
 #include "packbits.h"
 
-typedef unsigned char  uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned long  uint32_t;
-typedef unsigned long  size_t;
-#define NULL ((unsigned long)0)
+#define FLASH 0x2000000UL
+#define DQ5   0x20
+#define DQ6   0x40
 
-static unsigned long ctrl_reg = 0x2000000;
+#define BUFFER      ((unsigned char *)0x2000)
+#define BUFFER_SIZE 0x3000
+#define BUFFER_END  (BUFFER + BUFFER_SIZE)
 
-static unsigned short dq_poll(unsigned long addr) { return REG(addr); }
+#define CMU_GATEDCLK0 (*(volatile unsigned long *)0x301B00)
+#define CMU_PROTECT   (*(volatile unsigned long *)0x301B24)
+#define LCDC_IRAM     (*(volatile unsigned long *)0x301A64)
+#define LCDCSAPB_CKE  0x2
 
-static int verify(unsigned long addr, unsigned long expected) {
-    unsigned long old = INIDAT, cur;
-    while (1) {
-        cur = dq_poll(addr) & DQ6;
-        if (old == cur)
-            break;
-        old = cur;
-    }
-    return ((dq_poll(addr) & MSKLOW) == (expected & MSKLOW)) ? SUCCESS : E_VERIFY;
+#define DBG_TX     (*(volatile unsigned char *)0x78018)
+#define DBG_RX     (*(volatile unsigned char *)0x78019)
+#define DBG_STATUS (*(volatile unsigned char *)0x7801A)
+#define RDBF       0x1
+#define TDBE       0x2
+
+#define FLAG   0x7E
+#define ESCAPE 0x7D
+#define READY  0xA5
+
+#define REG(addr) (*(volatile unsigned short *)(addr))
+
+enum { READ, ERASE, MAP, WRITE };
+enum { OK, BAD_FRAME, BAD_FLASH, BAD_BUFFER };
+
+static unsigned long  cursor;
+static unsigned short word;
+static int            status;
+
+static void tx(unsigned char c) {
+    while (!(DBG_STATUS & TDBE))
+        ;
+    DBG_TX = c;
 }
 
-static void erase_cmd(unsigned long addr, int mode) {
-    REG(ctrl_reg + ADDR_COM1) = ERASE1;
-    REG(ctrl_reg + ADDR_COM2) = ERASE2;
-    REG(ctrl_reg + ADDR_COM1) = ERASE3;
-    REG(ctrl_reg + ADDR_COM1) = ERASE4;
-    REG(ctrl_reg + ADDR_COM2) = ERASE5;
-    if (mode == 1)
-        REG(ctrl_reg + ADDR_COM1) = ERASE6C;
-    else
-        REG(addr) = ERASE6S;
+static inline unsigned char rx(void) {
+    while (!(DBG_STATUS & RDBF))
+        ;
+    return DBG_RX;
 }
 
-static void program_word(unsigned long addr, unsigned long data) {
-    REG(ctrl_reg + ADDR_COM1) = PROG1;
-    REG(ctrl_reg + ADDR_COM2) = PROG2;
-    REG(ctrl_reg + ADDR_COM1) = PROG3;
-    REG(addr)                 = (unsigned short)data;
+static void flash_command(unsigned short command) {
+    REG(FLASH + 0xAAA) = 0xAA;
+    REG(FLASH + 0x554) = 0x55;
+    REG(FLASH + 0xAAA) = command;
 }
 
-int flash_erase(unsigned long base, unsigned long start, unsigned long end) {
-    ctrl_reg = base;
+static int flash_wait(unsigned long addr, unsigned short expected) {
+    unsigned short value;
 
-    if (base % BLKSIZE)
-        return E_REGERR;
-    if ((long)start == -1)
-        return E_CHANGE;
-    if ((long)start > BLKMAX || (long)start < 0)
-        return E_PARAM1;
-    if ((long)end > BLKMAX || (long)end < 0)
-        return E_PARAM2;
-
-    if (start == 0) {
-        erase_cmd(base, 1);
-        return verify(base, INIDAT);
-    }
-
-    for (start--, end--; start <= end; start++) {
-        unsigned long addr = start * BLKSIZE + base;
-
-        erase_cmd(addr, 2);
-
-        int ret = verify(addr, INIDAT);
-        if (ret != SUCCESS)
-            return ret;
-    }
-
-    return SUCCESS;
-}
-
-int flash_load(unsigned long addr, unsigned long data1, unsigned long data2) {
-    if (ctrl_reg % BLKSIZE)
-        return E_REGERR;
-
-    for (int i = 0; i < 4; i++) {
-        unsigned long word = (i < 2 ? data1 : data2) & MSKLOW;
-
-        if (i < 2)
-            data1 >>= 16;
-        else
-            data2 >>= 16;
-
-        if (i == 0 || word != INIDAT) {
-            if ((REG(addr) & word) != word)
-                return E_VERIFY;
-
-            program_word(addr, word);
-
-            int ret = verify(addr, word);
-            if (ret != SUCCESS)
-                return ret;
+    while (((value = REG(addr)) ^ REG(addr)) & DQ6) {
+        if ((value & DQ5) && (REG(addr) ^ REG(addr)) & DQ6) {
+            REG(FLASH) = 0xF0;
+            return BAD_FLASH;
         }
-        addr += 2;
     }
 
-    return SUCCESS;
+    return REG(addr) == expected ? OK : BAD_FLASH;
 }
 
-/*---------------------------------------------------------------------------
- Function name: DBG_PutC
- Description  : Put char into debug serial interface.
- Parameters   : ucData  (In)  - transmit data
- Return value : none
- *--------------------------------------------------------------------------*/
-void DBG_PutC(unsigned char ucData) {
-    while (!SSR_TDBE)
-        ;
-    STDR_TXD = ucData;
+static int erase(void) {
+    flash_command(0x80);
+    flash_command(0x10);
+
+    return flash_wait(FLASH, 0xFFFF);
 }
 
-/*---------------------------------------------------------------------------
- Function name: DBG_GetC
- Description  : Get char from debug serial interface
- Parameters   : none
- Return value : received data
- *--------------------------------------------------------------------------*/
-unsigned char DBG_GetC(void) {
-    while (!SSR_RDBF)
-        ;
-    return SRDR_RXD;
+static void program(unsigned long addr, unsigned short data) {
+    if (data == 0xFFFF)
+        return;
+
+    flash_command(0xA0);
+    REG(addr) = data;
+
+    status |= flash_wait(addr, data);
 }
 
-int dump(unsigned char *start, unsigned char *end) { return packbits(start, end - start, DBG_PutC); }
+static void emit(unsigned char c) {
+    if (cursor & 1)
+        program(cursor - 1, word | c << 8);
+    else
+        word = c;
 
-unsigned char *wpos;
-unsigned char wbuf[2];
+    cursor++;
+}
 
-void emit(unsigned char c) {
-    wbuf[(unsigned long) wpos & 1L] = (c);
+static int map_buffer(void) {
+    CMU_PROTECT = 0x96;
+    CMU_GATEDCLK0 |= LCDCSAPB_CKE;
+    CMU_PROTECT = 0;
 
-    if ((unsigned long) wpos & 1L) {
-        unsigned long word = wbuf[0] | (unsigned long)wbuf[1] << 8;
-        program_word((unsigned long) wpos & ~1L, word);
-        verify((unsigned long) wpos & ~1L, word);
+    LCDC_IRAM = 1;
+
+    return LCDC_IRAM & 1 ? OK : BAD_BUFFER;
+}
+
+static int write(unsigned long addr, unsigned int expected) {
+    unsigned char *end  = BUFFER;
+    unsigned int   crc  = ~0;
+    unsigned char  flip = 0;
+    unsigned char  c;
+
+    tx(READY);
+
+    while ((c = rx()) != FLAG) {
+        if (c == ESCAPE) {
+            flip = 0x20;
+            continue;
+        }
+
+        c ^= flip;
+        flip = 0;
+
+        crc = crc32_update(crc, c);
+
+        if (end < BUFFER_END)
+            *end = c;
+        end++;
     }
 
-    wpos++;
+    if (~crc != expected || end > BUFFER_END)
+        return BAD_FRAME;
+
+    cursor = addr;
+    status = OK;
+    unpackbits(BUFFER, end, emit);
+
+    return status;
 }
 
-unsigned char buf[64];
-
-int bulk_load(unsigned char *start, unsigned char *end) {
-    int ret = SUCCESS;
-    unsigned int len = (unsigned int) (end - start);
-
-    // DBG_PutC(0x01); // ACK
-
-    for (unsigned long addr = (unsigned long) start; addr < ((unsigned long) end & ~1UL); addr += 2) {
-        unsigned short word = DBG_GetC() | (DBG_GetC() << 8);
-        program_word(addr, word);
-        ret |= verify(addr, word);
+unsigned long entry(unsigned long op, unsigned long a, unsigned long b) {
+    switch (op) {
+    case READ:
+        return packbits((unsigned char *)a, b, tx);
+    case ERASE:
+        return a == FLASH ? erase() : ~0UL;
+    case MAP:
+        return map_buffer();
+    case WRITE:
+        return write(a, b);
     }
 
-    // for (unsigned long addr = (unsigned long) start; addr < ((unsigned long) end & ~1UL); addr += 2) {
-    //     unsigned short word = buf[addr - (unsigned long) start] | ((unsigned short)buf[addr - (unsigned long) start + 1] << 8);
-    //     program_word(addr, word);
-    //     ret |= verify(addr, word);
-    // }
-
-    // if ((unsigned long) end & 1L) {
-    //     unsigned char c = buf[(unsigned long) end - (unsigned long) start - 1] | 0xFF00UL;
-    //     program_word((unsigned long) end - 1, c);
-    //     ret |= verify((unsigned long) end - 1, c);
-    // }
-
-    return ret;
+    return ~0UL;
 }

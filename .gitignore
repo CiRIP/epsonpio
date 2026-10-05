@@ -224,3 +224,7 @@ __marimo__/
 
 build
 !.vscode/*
+
+
+docs/
+scripts/*.bin

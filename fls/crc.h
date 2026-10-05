@@ -18,15 +18,11 @@
 #ifndef _CRC_H
 #define _CRC_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 extern const unsigned int crc32_lut[16];
 
-unsigned int crc32(const void *data, unsigned int length, unsigned int crc);
-
-#ifdef __cplusplus
+static inline unsigned int crc32_update(unsigned int crc, unsigned char c) {
+    crc = crc32_lut[(crc ^ c) & 0x0F] ^ (crc >> 4);
+    return crc32_lut[(crc ^ (c >> 4)) & 0x0F] ^ (crc >> 4);
 }
-#endif
+
 #endif /* _CRC_H */
